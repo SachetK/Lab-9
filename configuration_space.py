@@ -1,6 +1,7 @@
+import math
+
 import numpy as np
 import matplotlib.pyplot as plt
-import math
 from queue import PriorityQueue
 
 # === Image dimensions from original image ===
@@ -141,8 +142,8 @@ def forward_kinematics(theta1, theta2):
     t2 = np.radians(theta2)
     x1 = L1 * np.cos(t1)
     y1 = L1 * np.sin(t1)
-    x2 = x1 + L2 * np.cos(t1 + t2)
-    y2 = y1 + L2 * np.sin(t1 + t2)
+    x2 = x1 + L2 * np.cos(t2)
+    y2 = y1 + L2 * np.sin(t2)
 
     return x1, y1, x2, y2
 
@@ -165,12 +166,15 @@ def inverse_kinematics(x, y):
     theta2_1 = np.arccos(cos_theta2)
     theta2_2 = -theta2_1
 
+    def wrap_to_180(theta):
+        return ((theta + 180) % 360) - 180
+
     # Solve for theta1 for each theta2
     def solve_theta1(theta2):
         k1 = L1 + L2 * np.cos(theta2)
         k2 = L2 * np.sin(theta2)
         theta1 = np.arctan2(y, x) - np.arctan2(k2, k1)
-        return np.degrees(theta1), np.degrees(theta2)
+        return np.degrees(theta1), wrap_to_180(np.degrees(theta1 + theta2))
 
     sol1 = solve_theta1(theta2_1)
     sol2 = solve_theta1(theta2_2)
@@ -202,7 +206,8 @@ def index_to_theta2(idx):
 def dijkstra_cspace(cspace, start, goal):
     DIRECTIONS = [(-1, 0, 1), (1, 0, 1), (0, -1, 1), (0, 1, 1),
                   (-1, -1, math.sqrt(2)), (1, -1, math.sqrt(2)),
-                  (-1, 1, math.sqrt(2)), (1, 1, math.sqrt(2))]
+                  (-1, 1, math.sqrt(2)), (1, 1, math.sqrt(2))
+                  ]
     turn_penalty = 0.8
 
     if start == goal:
@@ -297,7 +302,7 @@ def main():
 
     # === Define Start and Goal Positions in Field Space ===
     start_xy = (6.25, 0)
-    goal_xy = (-1.0, 6)
+    goal_xy = (-1.0, 5.5)
 
     # === Inverse kinematics (choose first solution for simplicity) ===
     start_ik = inverse_kinematics(*start_xy)[0]
@@ -323,16 +328,16 @@ def main():
     goal2_idx = (theta1_g2, theta2_g2)
 
     # === Print debug info ===
-    # print("Start IK:", start_ik)
-    # print("Goal IK (First Solution):", goal1_ik)
-    # print("Goal IK (Second Solution):", goal2_ik)
-    #
-    # print("Start FK:", forward_kinematics(*start_ik))
-    # print("Goal FK:", forward_kinematics(*goal1_ik))
-    #
-    # print("Start index:", start_idx)
-    # print("Goal Solution 1 index:", goal1_idx)
-    # print("Goal Solution 2 index:", goal2_idx)
+    print("Start IK:", start_ik)
+    print("Goal IK (First Solution):", goal1_ik)
+    print("Goal IK (Second Solution):", goal2_ik)
+
+    print("Start FK:", forward_kinematics(*start_ik))
+    print("Goal FK:", forward_kinematics(*goal1_ik))
+
+    print("Start index:", start_idx)
+    print("Goal Solution 1 index:", goal1_idx)
+    print("Goal Solution 2 index:", goal2_idx)
 
     # === C-space validation ===
     if cspace[start_idx] == 0:
