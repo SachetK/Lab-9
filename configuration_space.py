@@ -23,7 +23,7 @@ theta_res = 2
 
 # === Updated theta ranges ===
 theta1_vals = np.arange(0, 181, theta_res)  # θ₁ from 0° to 180°
-theta2_vals = np.arange(-180, 181, theta_res)  # θ₂ from -180° to 180°
+theta2_vals = np.arange(0, 361, theta_res)  # θ₂ from 0° to 360°
 
 def to_pixel(x, y):
     """Convert field inches to image pixel coordinates."""
@@ -81,7 +81,7 @@ def draw_field_map():
     for x, y, w, h in obstacles:
         draw_rectangle(image, x, y, w, h)
 
-    image = pad_obstacles(image, pad_radius_in=0.25, ppi_x=pixels_per_inch_x, ppi_y=pixels_per_inch_y)
+    image = pad_obstacles(image, pad_radius_in=0.5, ppi_x=pixels_per_inch_x, ppi_y=pixels_per_inch_y)
     fig, ax = plt.subplots(figsize=(12, 6))
     x_field, y_field = -1.0, 5.5  # example coordinate
     px, py = to_pixel(x_field, y_field)
@@ -132,6 +132,9 @@ def draw_cspace_map(image):
                 if image[tip_py, tip_px] == 0:
                     cspace[i, j] = 0  # Collision
 
+            if y2 < 0:
+                cspace[i, j] = 0
+
     cspace_valid = verify_cspace(cspace, image)
     print("Valid cspace:", cspace_valid)
 
@@ -166,15 +169,15 @@ def inverse_kinematics(x, y):
     theta2_1 = np.arccos(cos_theta2)
     theta2_2 = -theta2_1
 
-    def wrap_to_180(theta):
-        return ((theta + 180) % 360) - 180
+    def wrap_to_360(theta):
+        return theta % 360
 
     # Solve for theta1 for each theta2
     def solve_theta1(theta2):
         k1 = L1 + L2 * np.cos(theta2)
         k2 = L2 * np.sin(theta2)
         theta1 = np.arctan2(y, x) - np.arctan2(k2, k1)
-        return np.degrees(theta1), wrap_to_180(np.degrees(theta1 + theta2))
+        return np.degrees(theta1), wrap_to_360(np.degrees(theta1 + theta2))
 
     sol1 = solve_theta1(theta2_1)
     sol2 = solve_theta1(theta2_2)
@@ -197,16 +200,17 @@ def verify_cspace(cspace, image):
 
 # === Angle ↔ Index Conversion ===
 def theta2_to_index(theta2):
-    return int(round((theta2 + 180) / theta_res)) % len(theta2_vals)
+    wrapped = (theta2 + 360) % 360 # Ensure angle is in [0, 360)
+    return int(round(wrapped / theta_res)) % len(theta2_vals)
 
 def index_to_theta2(idx):
-    return -180 + idx * theta_res
+    return (idx * theta_res) % 360
 
 # === Dijkstra's Algorithm in C-space ===
 def dijkstra_cspace(cspace, start, goal):
     DIRECTIONS = [(-1, 0, 1), (1, 0, 1), (0, -1, 1), (0, 1, 1),
-                  (-1, -1, math.sqrt(2)), (1, -1, math.sqrt(2)),
-                  (-1, 1, math.sqrt(2)), (1, 1, math.sqrt(2))
+                  # (-1, -1, math.sqrt(2)), (1, -1, math.sqrt(2)),
+                  # (-1, 1, math.sqrt(2)), (1, 1, math.sqrt(2))
                   ]
     turn_penalty = 0.8
 
@@ -214,7 +218,7 @@ def dijkstra_cspace(cspace, start, goal):
         return []
 
     if cspace[start] == 0 or cspace[goal] == 0:
-        raise Exception("Path cannot exist! Endpoints invalid!")
+        return None
 
     height, width = cspace.shape
 
@@ -261,12 +265,98 @@ def dijkstra_cspace(cspace, start, goal):
 
     return path if path[0] == start else None
 
+def angle_diff_deg(a, b):
+    """Shortest signed angular difference from b to a, in [-180, 180)."""
+    return (a - b + 180) % 360 - 180
+
+def wrap_angle_deg(angle):
+    """Wrap angle to [0, 360)."""
+    return angle % 360
+
+def add_midpoints(cspace, path):
+    def midpoint_angles(theta1_a, theta2_a, theta1_b, theta2_b):
+        """Returns two midpoints (short and long arc) between angle pairs."""
+        # Shortest angle differences
+        d_theta1 = angle_diff_deg(theta1_b, theta1_a)
+        d_theta2 = angle_diff_deg(theta2_b, theta2_a)
+
+        # Midpoint along short arc
+        mid1_theta1 = wrap_angle_deg(theta1_a + d_theta1 / 2)
+        mid1_theta2 = wrap_angle_deg(theta2_a + d_theta2 / 2)
+
+        # Midpoint along long arc (i.e., move opposite direction by half-turn)
+        mid2_theta1 = wrap_angle_deg(theta1_a - d_theta1 / 2)
+        mid2_theta2 = wrap_angle_deg(theta2_a - d_theta2 / 2)
+
+        return (mid1_theta1, mid1_theta2), (mid2_theta1, mid2_theta2)
+
+    height, width = cspace.shape
+
+    compressed_path = []
+    path_len = len(path)
+
+    prev_dx, prev_dy = 0, 0
+    i = 0
+
+    while i < path_len - 1:
+        curr = path[i]
+        next_elem = path[i + 1]
+
+        dx = next_elem[0] - curr[0]
+        dy = next_elem[1] - curr[1]
+
+        if (prev_dx, prev_dy) != (dx, dy):
+            compressed_path.append(curr)
+            prev_dx, prev_dy = dx, dy
+
+        # Check for large jump
+        diff1 = abs(angle_diff_deg(next_elem[0], curr[0]))
+        diff2 = abs(angle_diff_deg(next_elem[1], curr[1]))
+
+        if diff1 >= 180 or diff2 >= 180:
+            (mid1_theta1, mid1_theta2), (mid2_theta1, mid2_theta2) = midpoint_angles(
+                curr[0], curr[1], next_elem[0], next_elem[1]
+            )
+            print(mid1_theta1, mid1_theta2, mid2_theta1, mid2_theta2)
+
+            # Try first midpoint
+            _, _, x1, y1 = forward_kinematics(mid1_theta1, mid1_theta2)
+            _, _, x2, y2 = forward_kinematics(mid2_theta1, mid2_theta2)
+
+            tip_x1 = int(round(mid1_theta1 / theta_res))
+            tip_y1 = theta2_to_index(mid1_theta2)
+
+            tip_x2 = int(round(mid2_theta1 / theta_res))
+            tip_y2 = theta2_to_index(mid2_theta2)
+
+            # print(cspace[tip_y1, tip_x2])
+            # print(cspace[tip_y2, tip_x2])
+
+            inserted = False
+            if 0 <= tip_x1 < width and 0 <= tip_y1 < height and cspace[tip_y1, tip_x1] == 1:
+                compressed_path.append((mid1_theta1, mid1_theta2))
+                print(f"✅ Inserted midpoint 1 at ({mid1_theta1:.1f}°, {mid1_theta2:.1f}°)")
+                inserted = True
+            elif 0 <= tip_x2 < width and 0 <= tip_y2 < height and cspace[tip_y2, tip_x2] == 1:
+                compressed_path.append((mid2_theta1, mid2_theta2))
+                print(f"✅ Inserted midpoint 2 at ({mid2_theta1:.1f}°, {mid2_theta2:.1f}°)")
+                inserted = True
+
+            if not inserted:
+                print(f"⚠️ Both midpoints invalid between {curr} and {next_elem}")
+
+        i += 1
+
+    if compressed_path[-1] != path[-1]:
+        compressed_path.append(path[-1])
+
+    return compressed_path
+
 def cleanup_path(path):
     compressed_path = []
 
     path_len = len(path)
 
-    i = 0
     prev_dx, prev_dy = 0, 0
 
     for i in range(path_len - 1):
@@ -285,8 +375,17 @@ def cleanup_path(path):
     return compressed_path
 
 def return_minimal_path(cspace, start, goal_first, goal_second):
-    path1 = dijkstra_cspace(cspace, start, goal_first) if cspace[goal_first] != 0 else None
-    path2 = dijkstra_cspace(cspace, start, goal_second) if cspace[goal_second] != 0 else None
+    height, width = cspace.shape
+
+    path1 = dijkstra_cspace(cspace, start, goal_first) if (0 <= goal_first[0] < height
+                                                           and 0 <= goal_first[1] < width
+                                                           and cspace[goal_first] != 0) else None
+    path2 = dijkstra_cspace(cspace, start, goal_second) if (0 <= goal_second[0] < height
+                                                           and 0 <= goal_second[1] < width
+                                                           and cspace[goal_second] != 0) else None
+
+    if path1 is None and path2 is None:
+        raise ValueError("No path")
 
     if path1 is None:
         return cleanup_path(path2)
@@ -302,75 +401,135 @@ def main():
 
     # === Define Start and Goal Positions in Field Space ===
     start_xy = (6.25, 0)
-    goal_xy = (-1.0, 5.5)
+    point1_xy = tuple(map(int, input("Enter point 1 coordinates, seperated by a space: ").split(" ")))
+    point2_xy = tuple(map(int, input("Enter point 2 coordinates, seperated by a space: ").split(" ")))
+    point3_xy = tuple(map(int, input("Enter point 3 coordinates, seperated by a space: ").split(" ")))
 
     # === Inverse kinematics (choose first solution for simplicity) ===
     start_ik = inverse_kinematics(*start_xy)[0]
 
-    if not inverse_kinematics(*goal_xy):
-        raise Exception("Goal is unreachable!")
+    if not inverse_kinematics(*point1_xy) or not inverse_kinematics(*point2_xy) or not inverse_kinematics(*point3_xy):
+        raise Exception("Point is unreachable!")
 
-    goal1_ik = inverse_kinematics(*goal_xy)[0]
-    goal2_ik = inverse_kinematics(*goal_xy)[1]
+    point1_sol1_ik = inverse_kinematics(*point1_xy)[0]
+    point1_sol2_ik = inverse_kinematics(*point1_xy)[1]
+
+    point2_sol1_ik = inverse_kinematics(*point2_xy)[0]
+    point2_sol2_ik = inverse_kinematics(*point2_xy)[1]
+
+    point3_sol1_ik = inverse_kinematics(*point3_xy)[0]
+    point3_sol2_ik = inverse_kinematics(*point3_xy)[1]
 
     # === Convert angles to C-space indices ===
     theta1_s = int(round(start_ik[0] / theta_res))
     theta2_s = theta2_to_index(start_ik[1])
 
-    theta1_g1 = int(round(goal1_ik[0] / theta_res))
-    theta2_g1 = theta2_to_index(goal1_ik[1])
+    theta1_p1_sol1 = int(round(point1_sol1_ik[0] / theta_res))
+    theta2_p1_sol1 = theta2_to_index(point1_sol1_ik[1])
 
-    theta1_g2 = int(round(goal2_ik[0] / theta_res))
-    theta2_g2 = theta2_to_index(goal2_ik[1])
+    theta1_p2_sol1 = int(round(point2_sol1_ik[0] / theta_res))
+    theta2_p2_sol1 = theta2_to_index(point2_sol1_ik[1])
+
+    theta1_p3_sol1 = int(round(point3_sol1_ik[0] / theta_res))
+    theta2_p3_sol1 = theta2_to_index(point3_sol1_ik[1])
+
+    theta1_p1_sol2 = int(round(point1_sol2_ik[0] / theta_res))
+    theta2_p1_sol2 = theta2_to_index(point1_sol2_ik[1])
+
+    theta1_p2_sol2 = int(round(point2_sol2_ik[0] / theta_res))
+    theta2_p2_sol2 = theta2_to_index(point2_sol2_ik[1])
+
+    theta1_p3_sol2 = int(round(point3_sol2_ik[0] / theta_res))
+    theta2_p3_sol2 = theta2_to_index(point3_sol2_ik[1])
+
 
     start_idx = (theta1_s, theta2_s)
-    goal1_idx = (theta1_g1, theta2_g1)
-    goal2_idx = (theta1_g2, theta2_g2)
+
+    point1_sol1_idx = (theta1_p1_sol1, theta2_p1_sol1)
+    point1_sol2_idx = (theta1_p1_sol2, theta2_p1_sol2)
+
+    point2_sol1_idx = (theta1_p2_sol1, theta2_p2_sol1)
+    point2_sol2_idx = (theta1_p2_sol2, theta2_p2_sol2)
+
+    point3_sol1_idx = (theta1_p3_sol1, theta2_p3_sol1)
+    point3_sol2_idx = (theta1_p3_sol2, theta2_p3_sol2)
 
     # === Print debug info ===
     print("Start IK:", start_ik)
-    print("Goal IK (First Solution):", goal1_ik)
-    print("Goal IK (Second Solution):", goal2_ik)
+    print("Point 1 IK (First Solution):", point1_sol1_ik)
+    print("Point 1 IK (Second Solution):", point1_sol2_ik)
+    print("Point 2 IK (First Solution):", point2_sol1_ik)
+    print("Point 2 IK (Second Solution):", point2_sol2_ik)
+    print("Point 3 IK (First Solution):", point3_sol1_ik)
+    print("Point 3 IK (Second Solution):", point3_sol2_ik)
 
     print("Start FK:", forward_kinematics(*start_ik))
-    print("Goal FK:", forward_kinematics(*goal1_ik))
+    print("Point 1 FK:", forward_kinematics(*point1_sol1_ik))
+    print("Point 2 FK:", forward_kinematics(*point2_sol1_ik))
+    print("Point 3 FK:", forward_kinematics(*point3_sol1_ik))
 
     print("Start index:", start_idx)
-    print("Goal Solution 1 index:", goal1_idx)
-    print("Goal Solution 2 index:", goal2_idx)
+    print("Point 1 Solution 1 index:", point1_sol1_idx)
+    print("Point 1 Solution 2 index:", point1_sol2_idx)
+
+    print("Point 2 Solution 1 index:", point2_sol1_idx)
+    print("Point 2 Solution 2 index:", point2_sol2_idx)
+
+    print("Point 3 Solution 1 index:", point3_sol1_idx)
+    print("Point 3 Solution 2 index:", point3_sol2_idx)
 
     # === C-space validation ===
-    if cspace[start_idx] == 0:
-        raise Exception("⚠️ Start configuration is in collision.")
-    if cspace[goal1_idx] == 0:
-        raise Exception("⚠️ Goal configuration is in collision.")
-    if not (0 <= theta1_s < cspace.shape[0] and 0 <= theta2_s < cspace.shape[1]):
-        raise Exception("⚠️ Start index out of bounds!")
-    if not ((0 <= theta1_g1 < cspace.shape[0] and 0 <= theta2_g1 < cspace.shape[1]) or
-            (0 <= theta1_g2 < cspace.shape[0] and 0 <= theta2_g2 < cspace.shape[1])):
-        raise Exception("⚠️ Goal index out of bounds!")
+    # if cspace[start_idx] == 0:
+    #     raise Exception("⚠️ Start configuration is in collision.")
+    # if cspace[goal1_idx] == 0:
+    #     raise Exception("⚠️ Goal configuration is in collision.")
+    # if not (0 <= theta1_s < cspace.shape[0] and 0 <= theta2_s < cspace.shape[1]):
+    #     raise Exception("⚠️ Start index out of bounds!")
+    # if not ((0 <= theta1_g1 < cspace.shape[0] and 0 <= theta2_g1 < cspace.shape[1]) or
+    #         (0 <= theta1_g2 < cspace.shape[0] and 0 <= theta2_g2 < cspace.shape[1])):
+    #     raise Exception("⚠️ Goal index out of bounds!")
 
     # === Run Dijkstra ===
-    path = return_minimal_path(cspace, start_idx, goal1_idx, goal2_idx)
-    print(path)
+
+
+    paths = [return_minimal_path(cspace, start_idx, point1_sol1_idx, point1_sol2_idx)]
+    paths.append(return_minimal_path(cspace, paths[-1][-1], point2_sol1_idx, point2_sol2_idx))
+    paths.append(return_minimal_path(cspace, paths[-1][-1], point3_sol1_idx, point3_sol2_idx))
+    print(paths)
 
     # === Plot the C-space and the path ===
     plt.figure(figsize=(10, 6))
     plt.imshow(cspace, cmap='gray', origin='lower',
-               extent=(-180, 180, 0, 180))  # extent sets the axis labels correctly
-    plt.plot(start_ik[1], start_ik[0], marker='o', color='red')
-    plt.plot(goal1_ik[1], goal1_ik[0], marker='o', color='blue')
+               extent=(0, 360, 0, 180))  # extent sets the axis labels correctly
+    plt.plot(start_ik, marker='o', color='r', markersize=5)
     plt.xlabel("Theta2 (degrees)")
     plt.ylabel("Theta1 (degrees)")
     plt.title("C-space Map")
 
-    if path:
-        path_t2 = [index_to_theta2(j) for (i, j) in path]
-        path_t1 = [i * theta_res for (i, j) in path]
-        plt.plot(path_t2, path_t1, color='red', linewidth=2, label='Path')
-        plt.show()
-    else:
-        print("⚠️ No path found — double-check start/goal collision or indexing.")
+    count = 0
+    with open("angles.txt", "w") as f:
+        for path in paths:
+            if path:
+                path_t2 = [index_to_theta2(j) for (i, j) in path]
+                path_t1 = [i * theta_res for (i, j) in path]
+
+                path_theta = [(t1, t2) for (t1, t2) in zip(path_t1, path_t2)]
+                path_theta = add_midpoints(cspace, path_theta)
+
+                for t1, t2 in path_theta:
+                    f.write(f"{t1} {t2}\n")
+                f.write("WAIT\n")
+
+                color = ['b', 'g', 'm']
+                plt.plot(path_t2[-1], path_t1[-1], marker='o', color=color[count], markersize=5)
+                plt.plot(path_t2, path_t1, color=color[count], linewidth=2, label='Path')
+            else:
+                print("⚠️ No path found — double-check start/goal collision or indexing.")
+
+            count += 1
+
+    plt.show()
+
 
 
 if __name__ == "__main__":
